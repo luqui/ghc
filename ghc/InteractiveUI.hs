@@ -259,6 +259,7 @@ helpText =
   "   :set args <arg> ...         set the arguments returned by System.getArgs\n" ++
   "   :set prog <progname>        set the value returned by System.getProgName\n" ++
   "   :set prompt <prompt>        set the prompt used in GHCi\n" ++
+  "   :set promptmore <prompt??   set the prompt used for multiline inputs\n" ++
   "   :set editor <cmd>           set the command used for :edit\n" ++
   "   :set stop [<n>] <cmd>       set the command to run when a breakpoint is hit\n" ++
   "   :unset <option> ...         unset options\n" ++
@@ -284,7 +285,7 @@ helpText =
   "   :show packages              show the currently active package flags\n" ++
   "   :show language              show the currently active language flags\n" ++
   "   :show <setting>             show value of <setting>, which is one of\n" ++
-  "                                  [args, prog, prompt, editor, stop]\n" ++
+  "                                  [args, prog, prompt, promptmore, editor, stop]\n" ++
   "   :showi language             show language flags for interactive evaluation\n" ++
   "\n"
 
@@ -301,9 +302,10 @@ findEditor = do
 
 foreign import ccall unsafe "rts_isProfiled" isProfiled :: IO CInt
 
-default_progname, default_prompt, default_stop :: String
+default_progname, default_prompt, default_promptmore, default_stop :: String
 default_progname = "<interactive>"
 default_prompt = "%s> "
+default_promptmore = "%s| "
 default_stop = ""
 
 default_args :: [String]
@@ -363,6 +365,7 @@ interactiveUI srcs maybe_exprs = do
         GHCiState{ progname       = default_progname,
                    GhciMonad.args = default_args,
                    prompt         = default_prompt,
+                   promptmore     = default_promptmore,
                    stop           = default_stop,
                    editor         = default_editor,
                    options        = [],
@@ -658,7 +661,7 @@ runOneCommand eh gCmd = do
     multiLineCmd q = do
       st <- lift getGHCiState
       let p = prompt st
-      lift $ setGHCiState st{ prompt = "%s| " }
+      lift $ setGHCiState st{ prompt = promptmore st }
       mb_cmd <- collectCommand q ""
       lift $ getGHCiState >>= \st' -> setGHCiState st'{ prompt = p }
       return mb_cmd
@@ -721,7 +724,7 @@ checkInputForLayout stmt getStmt = do
      _other              -> do
        st1 <- lift getGHCiState
        let p = prompt st1
-       lift $ setGHCiState st1{ prompt = "%s| " }
+       lift $ setGHCiState st1{ prompt = promptmore st1 }
        mb_stmt <- ghciHandle (\ex -> case fromException ex of
                             Just UserInterrupt -> return Nothing
                             _ -> case fromException ex of
@@ -1812,7 +1815,8 @@ setCmd str
         case toArgs rest of
             Right [prog] -> setProg prog
             _ -> liftIO (hPutStrLn stderr "syntax: :set prog <progname>")
-    Right ("prompt", rest) -> setPrompt $ dropWhile isSpace rest
+    Right ("prompt", rest)     -> setPrompt $ dropWhile isSpace rest
+    Right ("promptmore", rest) -> setPromptMore $ dropWhile isSpace rest
     Right ("editor", rest) -> setEditor $ dropWhile isSpace rest
     Right ("stop",   rest) -> setStop   $ dropWhile isSpace rest
     _ -> case toArgs str of
@@ -1875,7 +1879,7 @@ showDynFlags show_all dflags = do
                 ]
 
 setArgs, setOptions :: [String] -> GHCi ()
-setProg, setEditor, setStop, setPrompt :: String -> GHCi ()
+setProg, setEditor, setStop, setPrompt, setPromptMore :: String -> GHCi ()
 
 setArgs args = do
   st <- getGHCiState
@@ -1917,6 +1921,18 @@ setPrompt value = do
                        _ ->
                            liftIO $ hPutStrLn stderr "Can't parse prompt string. Use Haskell syntax."
            _ -> setGHCiState (st { prompt = value })
+
+setPromptMore value = do
+  st <- getGHCiState
+  if null value
+      then liftIO $ hPutStrLn stderr $ "syntax: :set promptmore <prompt>, currently \"" ++ promptmore st ++ "\""
+      else case value of
+           '\"' : _ -> case reads value of
+                       [(value', xs)] | all isSpace xs ->
+                           setGHCiState (st { promptmore = value' })
+                       _ ->
+                           liftIO $ hPutStrLn stderr "Can't parse prompt string. Use Haskell syntax."
+           _ -> setGHCiState (st { promptmore = value })
 
 setOptions wds =
    do -- first, deal with the GHCi opts (+s, +t, etc.)
@@ -1977,11 +1993,12 @@ unsetOptions str
          (other_opts, rest3) = partition (`elem` map fst defaulters) rest2
 
          defaulters =
-           [ ("args"  , setArgs default_args)
-           , ("prog"  , setProg default_progname)
-           , ("prompt", setPrompt default_prompt)
-           , ("editor", liftIO findEditor >>= setEditor)
-           , ("stop"  , setStop default_stop)
+           [ ("args"      , setArgs default_args)
+           , ("prog"      , setProg default_progname)
+           , ("prompt"    , setPrompt default_prompt)
+           , ("promptmore", setPrompt default_promptmore)
+           , ("editor"    , liftIO findEditor >>= setEditor)
+           , ("stop"      , setStop default_stop)
            ]
 
          no_flag ('-':'f':rest) = return ("-fno-" ++ rest)
@@ -2043,6 +2060,7 @@ showCmd str = do
         ["args"]     -> liftIO $ putStrLn (show (GhciMonad.args st))
         ["prog"]     -> liftIO $ putStrLn (show (progname st))
         ["prompt"]   -> liftIO $ putStrLn (show (prompt st))
+        ["promptmore"] -> liftIO $ putStrLn (show (promptmore st))
         ["editor"]   -> liftIO $ putStrLn (show (editor st))
         ["stop"]     -> liftIO $ putStrLn (show (stop st))
         ["imports"]  -> showImports
@@ -2055,7 +2073,7 @@ showCmd str = do
         ["languages"] -> showLanguages -- backwards compat
         ["language"]  -> showLanguages
         ["lang"]      -> showLanguages -- useful abbreviation
-        _ -> ghcError (CmdLineError ("syntax:  :show [ args | prog | prompt | editor | stop | modules | bindings\n"++
+        _ -> ghcError (CmdLineError ("syntax:  :show [ args | prog | prompt | promptmore | editor | stop | modules | bindings\n"++
                                      "               | breaks | context | packages | language ]"))
 
 showiCmd :: String -> GHCi ()
@@ -2260,7 +2278,7 @@ listHomeModules w = do
 
 completeSetOptions = wrapCompleter flagWordBreakChars $ \w -> do
   return (filter (w `isPrefixOf`) opts)
-    where opts = "args":"prog":"prompt":"editor":"stop":flagList
+    where opts = "args":"prog":"prompt":"promptmore":"editor":"stop":flagList
           flagList = map head $ group $ sort allFlags
 
 completeSeti = wrapCompleter flagWordBreakChars $ \w -> do
@@ -2269,7 +2287,7 @@ completeSeti = wrapCompleter flagWordBreakChars $ \w -> do
 
 completeShowOptions = wrapCompleter flagWordBreakChars $ \w -> do
   return (filter (w `isPrefixOf`) opts)
-    where opts = ["args", "prog", "prompt", "editor", "stop",
+    where opts = ["args", "prog", "prompt", "promptmore", "editor", "stop",
                      "modules", "bindings", "linker", "breaks",
                      "context", "packages", "language"]
 
